@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TikTok Video Downloader
+// @name         [TikTok] Video Downloader
 // @namespace    https://github.com/myouisaur/TikTok
 // @icon         https://www.tiktok.com/favicon.ico
-// @version      3.0
+// @version      3.1
 // @description  Adds a floating button to send TikTok videos to SnapTik for easy downloading
 // @author       Xiv
 // @match        *://*.tiktok.com/*
