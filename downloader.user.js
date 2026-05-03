@@ -2,8 +2,8 @@
 // @name         [TikTok] Video Downloader
 // @namespace    https://github.com/myouisaur/TikTok
 // @icon         https://www.tiktok.com/favicon.ico
-// @version      3.1
-// @description  Adds a floating button to send TikTok videos to SnapTik for easy downloading
+// @version      4.2
+// @description  Adds a button to download TikTok videos via SnapTik.
 // @author       Xiv
 // @match        *://*.tiktok.com/*
 // @match        *://snaptik.app/*
@@ -20,175 +20,200 @@
 (function() {
     'use strict';
 
-    // Configuration
     const CONFIG = {
         SNAPTIK_URL: 'https://snaptik.app/',
-        STORED_LINK_KEY: 'tiktok_stored_link'
+        STORED_LINK_KEY: 'tiktok_stored_link',
+        DEBOUNCE_TIME_MS: 2000
     };
 
-    // Add styles - positioned to avoid TikTok's right sidebar
+    // Centralized Fallback Selectors (Future-Proofing)
+    const SELECTORS = {
+        tiktok: {
+            avatar: '[data-e2e="video-author-avatar"]',
+            postContainer: '[data-e2e="recommend-list-item-container"], [data-e2e="search-card"], [data-e2e="user-post-item"], .feed-item, [data-e2e="video-item"]',
+            videoLink: 'a[href*="/video/"], a[href*="/t/"]',
+            commentBtn: [
+                'button[aria-label*="Read or add comments"]',
+                'button strong[data-e2e="comment-count"]',
+                'span[data-e2e="comment-icon"]',
+                'button.css-1ydks0-7937d88b--ButtonActionItem'
+            ]
+        },
+        snaptik: {
+            input: ['#url', 'input[name="url"]', 'input[type="text"]', '.link-input'],
+            submit: ['button[type="submit"].button-go', '.btn-submit', 'button[type="submit"]', '#submit'],
+            download: ['a.button.download-file[data-event="server01_file"]', 'a.button.download-file', 'a[href*="dl.snaptik.app"]', '.download-link'],
+            captchaOrError: ['iframe[src*="recaptcha"]', 'iframe[src*="turnstile"]', 'iframe[src*="hcaptcha"]', '.cf-turnstile', '.alert-danger', '.message-error']
+        }
+    };
+
     GM_addStyle(`
-        @keyframes colorCycle {
-            0%, 100% {
-                background-color: rgba(254, 44, 85, 0.9);
-            }
-            50% {
-                background-color: rgba(37, 244, 238, 0.9);
-            }
+        .tiktok-downloader-btn {
+            background: none;
+            border: none;
+            padding: 0;
+            margin: 0;
+            margin-bottom: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            cursor: pointer;
+            z-index: 999;
+            opacity: 1;
+            transition: opacity 0.2s ease;
         }
 
-        #tiktok-downloader-btn {
-            position: fixed;
-            top: 15px;
-            left: 200px;
+        .tiktok-downloader-btn.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .downloader-icon-wrapper {
             width: 48px;
             height: 48px;
-            background-color: rgba(254, 44, 85, 0.9);
-            color: #ffffff;
+            background-color: #1F1F1F;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
-            cursor: pointer;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-            z-index: 9999;
-            user-select: none;
-            animation: colorCycle 3s ease-in-out infinite !important;
+            color: #E8E8E8;
+            transition: background-color 0.2s ease, color 0.2s ease;
         }
 
-        #tiktok-downloader-btn:hover {
-            animation-play-state: paused !important;
-            transform: scale(1.05);
+        .tiktok-downloader-btn:not(.disabled):hover .downloader-icon-wrapper {
+            background-color: #141414;
         }
 
-        #tiktok-downloader-btn svg {
-            width: 22px;
-            height: 22px;
+        .tiktok-downloader-btn svg {
+            width: 24px;
+            height: 24px;
             fill: currentColor;
         }
 
-        #tiktok-downloader-btn.success {
-            background-color: rgba(37, 244, 238, 0.9) !important;
-            animation: none !important;
+        /* Status States */
+        .tiktok-downloader-btn.success .downloader-icon-wrapper {
+            background-color: #E8E8E8 !important; /* Swapped background */
+            color: #1F1F1F !important; /* Swapped icon color */
         }
 
-        #tiktok-downloader-btn.success:hover {
-            background-color: rgba(37, 244, 238, 1) !important;
+        .tiktok-downloader-btn.error .downloader-icon-wrapper {
+            background-color: rgba(255, 59, 48, 0.9) !important; /* Warning Red */
+            color: #fff;
         }
     `);
 
-    // State management
-    let button = null;
     let urlObserver = null;
     let commentCheckInterval = null;
     let commentStateObserver = null;
-    let userCommentPreference = 'auto'; // 'auto', 'open', 'closed'
-    let hasAutoOpenedOnce = false;
-    let lastKnownPath = ''; // Track the last path before navigation
+    let userCommentPreference = 'auto';
+    let lastKnownPath = '';
 
-    // Initialize based on current site
+    // --- Core Initialization ---
     function init() {
         if (window.location.hostname.includes('tiktok.com')) {
-            // Always monitor URL changes on TikTok
+            lastKnownPath = window.location.pathname;
             monitorUrlChanges();
-
-            // Monitor comment section state
             monitorCommentSection();
 
-            // Check if on main feed and auto-open comments (first time only)
-            if (isOnMainFeed()) {
-                autoOpenComments();
-            }
+            // Tab Visibility API (Global Cleanup/Pause)
+            document.addEventListener("visibilitychange", handleVisibilityChange);
 
-            // Show button if starting on a video page
-            if (isOnVideoPage()) {
-                createFloatingButton();
-            }
+            if (isOnMainFeed()) autoOpenComments();
+            if (isOnVideoPage()) createFloatingButton();
         } else if (window.location.hostname === 'snaptik.app') {
             initSnapTik();
         }
     }
 
-    // Check if currently on a video page
-    function isOnVideoPage() {
-        const hostname = window.location.hostname;
-        const pathname = window.location.pathname;
-
-        return hostname.includes('tiktok.com') &&
-               (pathname.includes('/@') && pathname.includes('/video/') ||
-                pathname.startsWith('/t/'));
+    // --- Helper: Find Element via Fallbacks ---
+    function findElement(selectorArray, parent = document) {
+        for (const selector of selectorArray) {
+            const el = parent.querySelector(selector);
+            if (el) return el;
+        }
+        return null;
     }
 
-    // Check if on main TikTok feed (anything that's NOT a video page)
+    // --- Tab Visibility Hook ---
+    function handleVisibilityChange() {
+        if (document.hidden) {
+            // Stop aggressive polling while tab is inactive
+            if (commentCheckInterval) {
+                clearInterval(commentCheckInterval);
+                commentCheckInterval = null;
+            }
+        } else {
+            // Re-sync state when user comes back
+            handleUrlChange();
+        }
+    }
+
+    // --- Routing Checks ---
+    function isOnVideoPage() {
+        return window.location.pathname.includes('/video/') || window.location.pathname.startsWith('/t/');
+    }
+
     function isOnMainFeed() {
         return !isOnVideoPage();
     }
 
-    // Auto-open comments section on main feed
+    // --- Precise Link Extraction ---
+    function getExactVideoLink(buttonElement) {
+        try {
+            // 1. Traverse up to the main post container
+            const container = buttonElement.closest(SELECTORS.tiktok.postContainer);
+            if (container) {
+                // 2. Find the anchor link inside this specific container
+                const linkEl = container.querySelector(SELECTORS.tiktok.videoLink);
+                if (linkEl && linkEl.href) {
+                    // Strip tracking parameters (?is_from_webapp...) for a clean link
+                    return linkEl.href.split('?')[0];
+                }
+            }
+        } catch (e) {
+            console.warn('DOM link extraction failed. Falling back to URL bar.');
+        }
+        // Fallback: Just grab the URL bar link (stripped of params)
+        return window.location.href.split('?')[0];
+    }
+
+    // --- TikTok Logic ---
     function autoOpenComments() {
-        // Don't auto-open if user explicitly closed comments
-        if (userCommentPreference === 'closed') {
-            console.log('User closed comments, not auto-opening');
-            return;
-        }
+        if (userCommentPreference === 'closed' || document.hidden) return;
+        if (commentCheckInterval) clearInterval(commentCheckInterval);
 
-        // Clear any existing interval
-        if (commentCheckInterval) {
-            clearInterval(commentCheckInterval);
-            commentCheckInterval = null;
-        }
-
-        console.log('Starting auto-open comments...');
-
-        const maxAttempts = 40;
         let attempts = 0;
+        const maxAttempts = 40;
 
         commentCheckInterval = setInterval(() => {
+            if (document.hidden) return; // Pause if user tabs out
             attempts++;
 
-            // Try multiple selectors to find the comment button
-            const commentBtn =
-                document.querySelector('button[aria-label*="Read or add comments"]') ||
-                document.querySelector('button strong[data-e2e="comment-count"]')?.closest('button') ||
-                document.querySelector('span[data-e2e="comment-icon"]')?.closest('button') ||
-                document.querySelector('button.css-1ydks0-7937d88b--ButtonActionItem');
-
+            const commentBtn = findElement(SELECTORS.tiktok.commentBtn);
             if (commentBtn) {
-                console.log('Comment button found on attempt', attempts, commentBtn);
                 clearInterval(commentCheckInterval);
                 commentCheckInterval = null;
-
-                // Small delay before clicking to ensure everything is ready
                 setTimeout(() => {
                     commentBtn.click();
-                    console.log('Comment button clicked (auto)');
                     userCommentPreference = 'open';
-                    hasAutoOpenedOnce = true;
-
-                    // After clicking comments, check for video page URL change
                     checkForVideoPageAfterComment();
                 }, 100);
                 return;
             }
 
             if (attempts >= maxAttempts) {
-                console.warn('Comment button not found after', maxAttempts, 'attempts (20 seconds)');
                 clearInterval(commentCheckInterval);
                 commentCheckInterval = null;
             }
         }, 500);
     }
 
-    // Monitor URL changes for single-page app navigation
     function monitorUrlChanges() {
-        // Disconnect existing observer if any
-        if (urlObserver) {
-            urlObserver.disconnect();
-        }
-
+        if (urlObserver) urlObserver.disconnect();
         let lastUrl = window.location.href;
 
         urlObserver = new MutationObserver(() => {
+            if (document.hidden) return; // Ignore DOM noise while hidden
             const currentUrl = window.location.href;
             if (currentUrl !== lastUrl) {
                 lastUrl = currentUrl;
@@ -196,274 +221,235 @@
             }
         });
 
-        // Use throttled observation to reduce CPU usage
-        urlObserver.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
+        urlObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     function handleUrlChange() {
-        // Clear any running comment check interval when URL changes
         if (commentCheckInterval) {
             clearInterval(commentCheckInterval);
             commentCheckInterval = null;
         }
 
-        const currentUrl = window.location.href;
         const currentPath = window.location.pathname;
-
-        console.log('URL changed to:', currentUrl);
-        console.log('User comment preference:', userCommentPreference);
-        console.log('Has auto opened once:', hasAutoOpenedOnce);
-
         const nowOnMainFeed = isOnMainFeed();
         const nowOnVideoPage = isOnVideoPage();
 
+        if (nowOnMainFeed && lastKnownPath !== currentPath && !lastKnownPath.includes('/video/')) {
+            userCommentPreference = 'auto';
+        }
+        lastKnownPath = currentPath;
+
         if (nowOnVideoPage) {
-            console.log('On video page, creating button...');
-            // Show button if it doesn't exist
-            if (!document.getElementById('tiktok-downloader-btn')) {
-                createFloatingButton();
-            }
-            // Update preference only if it was 'auto'
-            if (userCommentPreference === 'auto') {
-                userCommentPreference = 'open';
-            }
+            createFloatingButton();
+            if (userCommentPreference === 'auto') userCommentPreference = 'open';
         } else if (nowOnMainFeed) {
-            // Only auto-open on very first time
-            if (!hasAutoOpenedOnce && userCommentPreference !== 'closed') {
-                console.log('Auto-opening comments (FIRST TIME ONLY)');
-                hasAutoOpenedOnce = true; // Set BEFORE calling autoOpenComments
-                autoOpenComments();
-            } else {
-                console.log('Not auto-opening - hasAutoOpenedOnce:', hasAutoOpenedOnce, 'preference:', userCommentPreference);
-                removeButton();
-            }
+            if (userCommentPreference !== 'closed') autoOpenComments();
+            else removeButton();
         } else {
-            // Hide button when not on video page
             removeButton();
         }
     }
 
     function createFloatingButton() {
-        // Avoid duplicate buttons
-        if (document.getElementById('tiktok-downloader-btn')) return;
+        let attempts = 0;
+        const maxAttempts = 10;
 
-        button = document.createElement('div');
-        button.id = 'tiktok-downloader-btn';
-        button.innerHTML = `
-            <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-            </svg>
-        `;
-        button.title = 'Download TikTok Video';
+        const tryInsert = () => {
+            const avatarLinks = document.querySelectorAll(SELECTORS.tiktok.avatar);
+            let insertedSomething = false;
 
-        // Click handler
-        button.addEventListener('click', handleButtonClick);
+            avatarLinks.forEach(avatarLink => {
+                const actionBar = avatarLink.closest('section');
+                if (actionBar && !actionBar.querySelector('.tiktok-downloader-btn')) {
+                    const btn = document.createElement('button');
+                    btn.className = 'tiktok-downloader-btn';
+                    btn.type = 'button';
+                    btn.title = 'Download via SnapTik';
+                    btn.dataset.clicking = "false"; // Debounce state
 
-        document.body.appendChild(button);
+                    btn.innerHTML = `
+                        <span class="downloader-icon-wrapper">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                            </svg>
+                        </span>
+                    `;
+
+                    btn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        handleButtonClick(this);
+                    });
+
+                    actionBar.insertBefore(btn, actionBar.firstChild);
+                    insertedSomething = true;
+                }
+            });
+
+            if (!insertedSomething && attempts < maxAttempts) {
+                attempts++;
+                setTimeout(tryInsert, 500);
+            }
+        };
+
+        tryInsert();
     }
 
-    function handleButtonClick() {
-        const currentUrl = window.location.href;
+    function handleButtonClick(clickedButton) {
+        // Spam Prevention
+        if (clickedButton.dataset.clicking === "true") return;
+        clickedButton.dataset.clicking = "true";
+        clickedButton.classList.add('disabled');
 
-        // Copy to clipboard
-        GM_setClipboard(currentUrl);
+        const exactUrl = getExactVideoLink(clickedButton);
 
-        // Store the link
-        GM_setValue(CONFIG.STORED_LINK_KEY, currentUrl);
+        try {
+            // Attempt Clipboard API
+            GM_setClipboard(exactUrl);
+            GM_setValue(CONFIG.STORED_LINK_KEY, exactUrl);
 
-        // Visual feedback
-        button.classList.add('success');
-        button.title = 'Link copied!';
+            // Success State (Visual swap)
+            clickedButton.classList.add('success');
+
+            setTimeout(() => {
+                GM_openInTab(CONFIG.SNAPTIK_URL, { active: true, insert: true });
+            }, 150);
+
+        } catch (err) {
+            // Graceful Failure State (Red icon)
+            console.error("TikTok Downloader: Clipboard error", err);
+            clickedButton.classList.add('error');
+        }
+
+        // Debounce Reset
         setTimeout(() => {
-            button.classList.remove('success');
-            button.title = 'Download TikTok Video';
-        }, 300);
-
-        // Open SnapTik in new tab
-        GM_openInTab(CONFIG.SNAPTIK_URL, { active: true, insert: true });
+            clickedButton.classList.remove('success', 'error', 'disabled');
+            clickedButton.dataset.clicking = "false";
+        }, CONFIG.DEBOUNCE_TIME_MS);
     }
 
-    // SnapTik functionality
+    function checkForVideoPageAfterComment() {
+        let attempts = 0;
+        const checkInterval = setInterval(() => {
+            attempts++;
+            if (isOnVideoPage()) {
+                clearInterval(checkInterval);
+                setTimeout(createFloatingButton, 200);
+            }
+            if (attempts >= 30) clearInterval(checkInterval);
+        }, 300);
+    }
+
+    function monitorCommentSection() {
+        if (commentStateObserver) commentStateObserver.disconnect();
+        let lastPath = window.location.pathname;
+
+        commentStateObserver = new MutationObserver(() => {
+            if (document.hidden) return;
+            const currentPath = window.location.pathname;
+
+            if (lastPath.includes('/video/') && !currentPath.includes('/video/')) {
+                userCommentPreference = 'closed';
+                removeButton();
+            } else if (!lastPath.includes('/video/') && currentPath.includes('/video/')) {
+                userCommentPreference = 'open';
+                createFloatingButton();
+            }
+            lastPath = currentPath;
+        });
+
+        commentStateObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function removeButton() {
+        document.querySelectorAll('.tiktok-downloader-btn').forEach(btn => btn.remove());
+    }
+
+    // --- SnapTik Logic ---
+    function checkSnapTikErrors() {
+        const errorEl = findElement(SELECTORS.snaptik.captchaOrError);
+        return errorEl !== null;
+    }
+
     function initSnapTik() {
         const storedLink = GM_getValue(CONFIG.STORED_LINK_KEY);
-
         if (storedLink) {
             fillInputField(storedLink);
-            // Clear stored link after use
             GM_setValue(CONFIG.STORED_LINK_KEY, null);
         }
     }
 
     function fillInputField(url) {
-        // Wait for the input field to be available
-        const maxAttempts = 20;
         let attempts = 0;
+        const maxAttempts = 60; // 30 seconds
 
         const interval = setInterval(() => {
-            const inputField = document.getElementById('url');
-
-            if (inputField) {
-                inputField.value = url;
-                inputField.focus();
-
-                // Trigger input event for any listeners
-                inputField.dispatchEvent(new Event('input', { bubbles: true }));
-                inputField.dispatchEvent(new Event('change', { bubbles: true }));
-
+            // Captcha/Error Halt
+            if (checkSnapTikErrors()) {
+                console.warn('SnapTik Downloader: Captcha or Error detected. Manual intervention required.');
                 clearInterval(interval);
+                return;
+            }
 
-                // Click the Download button after filling
-                clickDownloadButton();
+            // Only proceed if DOM is somewhat stable
+            if (document.readyState === 'interactive' || document.readyState === 'complete') {
+                const inputField = findElement(SELECTORS.snaptik.input);
+                if (inputField) {
+                    inputField.value = url;
+                    inputField.focus();
+                    inputField.dispatchEvent(new Event('input', { bubbles: true }));
+                    inputField.dispatchEvent(new Event('change', { bubbles: true }));
+
+                    clearInterval(interval);
+                    clickDownloadButton();
+                }
             }
 
             attempts++;
-            if (attempts >= maxAttempts) {
-                clearInterval(interval);
-                console.warn('SnapTik input field not found');
-            }
-        }, 200);
+            if (attempts >= maxAttempts) clearInterval(interval);
+        }, 500);
     }
 
     function clickDownloadButton() {
-        // Wait a moment for the page to process the input
         setTimeout(() => {
-            const downloadBtn = document.querySelector('button[type="submit"].button-go');
-
+            const downloadBtn = findElement(SELECTORS.snaptik.submit);
             if (downloadBtn) {
                 downloadBtn.click();
-
-                // Wait for the second download button to appear
                 waitForFinalDownloadButton();
-            } else {
-                console.warn('Download button not found');
             }
         }, 500);
     }
 
     function waitForFinalDownloadButton() {
-        // Wait for the final download link to appear after processing
-        const maxAttempts = 30;
         let attempts = 0;
+        const maxAttempts = 120; // Up to 60 seconds of waiting for processing
 
         const interval = setInterval(() => {
-            const finalDownloadLink = document.querySelector('a.button.download-file[data-event="server01_file"]');
+            if (checkSnapTikErrors()) {
+                clearInterval(interval);
+                return;
+            }
 
+            const finalDownloadLink = findElement(SELECTORS.snaptik.download);
             if (finalDownloadLink) {
                 clearInterval(interval);
-                // Click the final download link
                 finalDownloadLink.click();
             }
 
             attempts++;
-            if (attempts >= maxAttempts) {
-                clearInterval(interval);
-                console.warn('Final download button not found');
-            }
-        }, 300);
+            if (attempts >= maxAttempts) clearInterval(interval);
+        }, 500);
     }
 
-    // Check if URL changed to video page after clicking comments
-    function checkForVideoPageAfterComment() {
-        const maxAttempts = 30;
-        let attempts = 0;
-
-        const checkInterval = setInterval(() => {
-            attempts++;
-
-            if (isOnVideoPage()) {
-                console.log('Video page detected after comment click');
-                clearInterval(checkInterval);
-
-                // Create button if it doesn't exist - with a small delay to ensure DOM is ready
-                setTimeout(() => {
-                    if (!document.getElementById('tiktok-downloader-btn')) {
-                        console.log('Creating button after video page detection');
-                        createFloatingButton();
-                    }
-                }, 200);
-            }
-
-            if (attempts >= maxAttempts) {
-                clearInterval(checkInterval);
-                console.warn('Video page not detected after comment click');
-            }
-        }, 300);
-    }
-
-    // Monitor comment section state (open/closed)
-    function monitorCommentSection() {
-        if (commentStateObserver) {
-            commentStateObserver.disconnect();
-        }
-
-        let lastPath = window.location.pathname;
-
-        commentStateObserver = new MutationObserver(() => {
-            const currentPath = window.location.pathname;
-
-            // Detect when user manually closes comments (video page → main feed)
-            if (lastPath.includes('/video/') && !currentPath.includes('/video/')) {
-                console.log('User closed comments manually - setting preference to closed');
-                userCommentPreference = 'closed';
-                hasAutoOpenedOnce = true; // Ensure we never auto-open again
-                removeButton();
-            }
-
-            // Detect when user manually opens comments (main feed → video page)
-            else if (!lastPath.includes('/video/') && currentPath.includes('/video/')) {
-                console.log('User opened comments manually - setting preference to open');
-                userCommentPreference = 'open';
-                if (!document.getElementById('tiktok-downloader-btn')) {
-                    createFloatingButton();
-                }
-            }
-
-            lastPath = currentPath;
-        });
-
-        commentStateObserver.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-    }
-
-    // Cleanup function to prevent memory leaks
+    // --- Cleanup ---
     function cleanup() {
         removeButton();
-
-        // Clear comment check interval
-        if (commentCheckInterval) {
-            clearInterval(commentCheckInterval);
-            commentCheckInterval = null;
-        }
-
-        // Disconnect observers
-        if (urlObserver) {
-            urlObserver.disconnect();
-            urlObserver = null;
-        }
-
-        if (commentStateObserver) {
-            commentStateObserver.disconnect();
-            commentStateObserver = null;
-        }
+        if (commentCheckInterval) clearInterval(commentCheckInterval);
+        if (urlObserver) urlObserver.disconnect();
+        if (commentStateObserver) commentStateObserver.disconnect();
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
     }
 
-    function removeButton() {
-        if (button && button.parentNode) {
-            button.removeEventListener('click', handleButtonClick);
-            button.remove();
-            button = null;
-        }
-    }
-
-    // Initialize on page load
     init();
-
-    // Cleanup on page unload
     window.addEventListener('beforeunload', cleanup);
 
 })();
