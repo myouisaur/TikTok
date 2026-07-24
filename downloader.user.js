@@ -2,7 +2,7 @@
 // @name         [TikTok] Video Downloader
 // @namespace    https://github.com/myouisaur/TikTok
 // @icon         https://www.tiktok.com/favicon.ico
-// @version      7.0
+// @version      9.0
 // @description  Adds a button to download TikTok videos via SSSTik in the background.
 // @author       Xiv
 // @match        *://*.tiktok.com/*
@@ -38,8 +38,7 @@
         },
         classes: {
             btn: 'xiv-downloader-btn',
-            wrapper: 'xiv-icon-wrapper',
-            processedAvatar: 'xiv-processed-avatar'
+            wrapper: 'xiv-icon-wrapper'
         },
         ids: {
             style: 'xiv-styles'
@@ -51,11 +50,20 @@
             bgError:  '#ff4444',
             fgNormal: '#E8E8E8',
             fgActive: '#1F1F1F',
-            fgError:  '#FFFFFF'
+            fgError:  '#FFFFFF',
+
+            // Context-aware modal colors (matching native TikTok semi-transparent overlay)
+            modalBgNormal: 'rgba(255, 255, 255, 0.12)',
+            modalBgHover:  'rgba(255, 255, 255, 0.20)',
+            modalFgNormal: 'rgba(255, 255, 255, 0.9)'
         },
         selectors: {
             tiktok: {
-                avatar: '[data-e2e="video-author-avatar"]',
+                actionAnchors: [
+                    '[data-e2e="video-author-avatar"]',
+                    '[data-e2e="browse-like-icon"]',
+                    '[data-e2e="like-icon"]'
+                ],
                 commentsContainer: '[data-e2e="video-comment-list"], [data-e2e="search-comment-container"], [data-e2e="comment-input"]',
                 commentBtn: [
                     '[data-e2e="comment-icon"]',
@@ -186,9 +194,10 @@
             const style = document.createElement('style');
             style.id = CONFIG.ids.style;
             style.textContent = `
+                /* Base Styles (Feed Default) */
                 .${CONFIG.classes.btn} {
                     background: none; border: none; padding: 0; margin: 0 0 12px 0;
-                    display: flex; flex-direction: column; align-items: center;
+                    display: flex; flex-direction: column; align-items: center; justify-content: center;
                     cursor: pointer; z-index: 999; opacity: 1;
                     transition: opacity 0.2s ease;
                 }
@@ -207,6 +216,23 @@
                 }
                 .${CONFIG.classes.btn} svg {
                     width: 24px; height: 24px; fill: currentColor;
+                }
+
+                /* Context-Aware Overrides (Modal/Theater View) */
+                .${CONFIG.classes.btn}[data-view-mode="modal"] {
+                    margin: 0;
+                    flex-direction: row;
+                }
+                .${CONFIG.classes.btn}[data-view-mode="modal"] .${CONFIG.classes.wrapper} {
+                    width: 32px; height: 32px;
+                    background-color: ${CONFIG.colors.modalBgNormal};
+                    color: ${CONFIG.colors.modalFgNormal};
+                }
+                .${CONFIG.classes.btn}[data-view-mode="modal"]:not([data-state="processing"]):hover .${CONFIG.classes.wrapper} {
+                    background-color: ${CONFIG.colors.modalBgHover};
+                }
+                .${CONFIG.classes.btn}[data-view-mode="modal"] svg {
+                    width: 20px; height: 20px;
                 }
             `;
             (document.head || document.documentElement).appendChild(style);
@@ -229,7 +255,7 @@
                     if (linkEl && linkEl.href) return linkEl.href.split('?')[0];
                 }
             } catch (e) {
-                logger.warn('DOM link extraction failed. Falling back to URL bar.');
+                logger.warn('DOM link extraction failed.');
             }
             return window.location.href.split('?')[0];
         }
@@ -360,19 +386,37 @@
         }
 
         function maintainUI() {
-            const avatarLinks = document.querySelectorAll(`${CONFIG.selectors.tiktok.avatar}:not(.${CONFIG.classes.processedAvatar})`);
+            const anchors = document.querySelectorAll(CONFIG.selectors.tiktok.actionAnchors.join(', '));
 
-            avatarLinks.forEach(avatarLink => {
-                avatarLink.classList.add(CONFIG.classes.processedAvatar);
+            anchors.forEach(anchor => {
+                let actionBar = null;
+                let insertReference = null;
+                let detectedViewMode = 'feed';
 
-                const actionBar = avatarLink.closest('section');
+                if (anchor.matches('[data-e2e="video-author-avatar"]')) {
+                    // Standard Vertical Feed View
+                    actionBar = anchor.closest('section');
+                    if (actionBar) insertReference = actionBar.firstChild;
+                } else {
+                    // Theater/Modal Horizontal View
+                    // Skip if this like button is actually nested inside a standard feed section
+                    if (anchor.closest('section')) return;
+
+                    const btnWrapper = anchor.closest('button');
+                    if (btnWrapper) {
+                        actionBar = btnWrapper.parentElement;
+                        insertReference = btnWrapper;
+                        detectedViewMode = 'modal';
+                    }
+                }
+
                 if (actionBar && !actionBar.querySelector(`.${CONFIG.classes.btn}`)) {
-
                     const btn = document.createElement('button');
                     btn.className = CONFIG.classes.btn;
                     btn.type = 'button';
                     btn.title = 'Download via SSSTik';
                     btn.dataset.state = "idle";
+                    btn.dataset.viewMode = detectedViewMode;
 
                     const wrapper = document.createElement('span');
                     wrapper.className = CONFIG.classes.wrapper;
@@ -397,7 +441,7 @@
                         }, 500);
                     };
 
-                    actionBar.insertBefore(btn, actionBar.firstChild);
+                    actionBar.insertBefore(btn, insertReference);
                 }
             });
         }
