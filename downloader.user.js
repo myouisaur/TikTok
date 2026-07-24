@@ -2,13 +2,14 @@
 // @name         [TikTok] Video Downloader
 // @namespace    https://github.com/myouisaur/TikTok
 // @icon         https://www.tiktok.com/favicon.ico
-// @version      5.0
-// @description  Adds a button to download TikTok videos via SnapTik in the background.
+// @version      7.0
+// @description  Adds a button to download TikTok videos via SSSTik in the background.
 // @author       Xiv
 // @match        *://*.tiktok.com/*
-// @match        *://snaptik.app/*
+// @match        *://ssstik.io/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_addValueChangeListener
 // @grant        GM_openInTab
 // @grant        window.close
 // @run-at       document-start
@@ -20,8 +21,8 @@
 (function() {
     'use strict';
 
-    if (window.__tkDlInit) return;
-    window.__tkDlInit = true;
+    if (window.xivInitialized) return;
+    window.xivInitialized = true;
 
     // ==========================================
     // CENTRALIZED CONFIGURATION
@@ -29,43 +30,52 @@
     const CONFIG = {
         debug: false,
         urls: {
-            snaptik: 'https://snaptik.app/'
+            ssstik: 'https://ssstik.io/en'
         },
         storage: {
-            urlKey: 'tiktok_stored_link'
+            urlKey: 'xiv_tiktok_stored_link',
+            stateKey: 'xiv_ssstik_state'
+        },
+        classes: {
+            btn: 'xiv-downloader-btn',
+            wrapper: 'xiv-icon-wrapper',
+            processedAvatar: 'xiv-processed-avatar'
+        },
+        ids: {
+            style: 'xiv-styles'
         },
         colors: {
             bgNormal: '#1F1F1F',
             bgHover:  '#141414',
             bgActive: '#E8E8E8',
+            bgError:  '#ff4444',
             fgNormal: '#E8E8E8',
-            fgActive: '#1F1F1F'
+            fgActive: '#1F1F1F',
+            fgError:  '#FFFFFF'
         },
         selectors: {
             tiktok: {
                 avatar: '[data-e2e="video-author-avatar"]',
-                commentsContainer: '[data-e2e="video-comment-list"], #search-comment-container, [data-e2e="search-comment-container"], [data-e2e="comment-input"]',
+                commentsContainer: '[data-e2e="video-comment-list"], [data-e2e="search-comment-container"], [data-e2e="comment-input"]',
                 commentBtn: [
-                    'button[aria-label*="Read or add comments"]',
-                    'button strong[data-e2e="comment-count"]',
-                    'span[data-e2e="comment-icon"]',
-                    'button.css-1ydks0-7937d88b--ButtonActionItem'
+                    '[data-e2e="comment-icon"]',
+                    'button[aria-label*="Read or add comments" i]',
+                    'button strong[data-e2e="comment-count"]'
                 ],
                 postContainer: '[data-e2e="recommend-list-item-container"], [data-e2e="search-card"], [data-e2e="user-post-item"], .feed-item, [data-e2e="video-item"]',
                 videoLink: 'a[href*="/video/"], a[href*="/t/"]'
             },
-            snaptik: {
-                input: ['#url', 'input[name="url"]', 'input[type="text"]', '.link-input'],
-                submit: ['button[type="submit"].button-go', '.btn-submit', 'button[type="submit"]', '#submit'],
-                download: ['a.button.download-file[data-event="server01_file"]', 'a.button.download-file', 'a[href*="dl.snaptik.app"]', '.download-link'],
-                captchaOrError: ['iframe[src*="recaptcha"]', 'iframe[src*="turnstile"]', 'iframe[src*="hcaptcha"]', '.cf-turnstile', '.alert-danger', '.message-error']
+            ssstik: {
+                input: ['#main_page_text'],
+                submit: ['#submit'],
+                download: ['a.without_watermark']
             }
         },
         timeouts: {
             uiWait:        10000,
             dlMaxWait:     60000,
             tabCloseDelay: 2500,
-            actionWait:    200
+            actionWait:    300
         }
     };
 
@@ -86,6 +96,13 @@
         set: (key, val) => {
             try { GM_setValue(key, val); }
             catch (e) { logger.error(`Failed to write ${key}`, e); }
+        },
+        listen: (key, callback) => {
+            try {
+                if (typeof GM_addValueChangeListener !== 'undefined') {
+                    GM_addValueChangeListener(key, callback);
+                }
+            } catch (e) { logger.error(`Failed to listen to ${key}`, e); }
         }
     };
 
@@ -112,7 +129,6 @@
             }
         },
 
-        // Modified for TikTok's fallback array selectors
         waitForElement: (selectors, timeoutMs = CONFIG.timeouts.uiWait) => {
             const selectorArray = Array.isArray(selectors) ? selectors : [selectors];
 
@@ -137,7 +153,6 @@
                     }
                 });
 
-                // documentElement guarantees it works at document-start before body exists
                 observer.observe(document.documentElement, { childList: true, subtree: true });
 
                 const timer = setTimeout(() => {
@@ -146,13 +161,6 @@
                 }, timeoutMs);
             });
         }
-    };
-
-    const isCaptchaPresent = () => {
-        for (const sel of CONFIG.selectors.snaptik.captchaOrError) {
-            if (document.querySelector(sel)) return true;
-        }
-        return false;
     };
 
     const findElementSync = (selectorArray, parent = document) => {
@@ -173,37 +181,44 @@
         let autoOpenObserver = null;
         let hasAttemptedAutoOpen = false;
 
-        // Stylesheet Injection
-        const styleId = 'tk-dl-styles';
-        if (!document.getElementById(styleId)) {
+        function injectStyles() {
+            if (document.getElementById(CONFIG.ids.style)) return;
             const style = document.createElement('style');
-            style.id = styleId;
+            style.id = CONFIG.ids.style;
             style.textContent = `
-                .tiktok-downloader-btn {
+                .${CONFIG.classes.btn} {
                     background: none; border: none; padding: 0; margin: 0 0 12px 0;
                     display: flex; flex-direction: column; align-items: center;
                     cursor: pointer; z-index: 999; opacity: 1;
                     transition: opacity 0.2s ease;
                 }
-                .tiktok-downloader-btn[data-state="processing"] {
+                .${CONFIG.classes.btn}[data-state="processing"] {
                     opacity: 0.5; cursor: wait;
                 }
-                .downloader-icon-wrapper {
+                .${CONFIG.classes.wrapper} {
                     width: 48px; height: 48px;
                     background-color: ${CONFIG.colors.bgNormal};
                     border-radius: 50%; display: flex; align-items: center; justify-content: center;
                     color: ${CONFIG.colors.fgNormal};
                     transition: background-color 0.2s ease, color 0.2s ease;
                 }
-                .tiktok-downloader-btn:not([data-state="processing"]):hover .downloader-icon-wrapper {
+                .${CONFIG.classes.btn}:not([data-state="processing"]):hover .${CONFIG.classes.wrapper} {
                     background-color: ${CONFIG.colors.bgHover};
                 }
-                .tiktok-downloader-btn svg {
+                .${CONFIG.classes.btn} svg {
                     width: 24px; height: 24px; fill: currentColor;
                 }
             `;
-            // Safe append for document-start
             (document.head || document.documentElement).appendChild(style);
+        }
+
+        function createDownloadIcon() {
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('viewBox', '0 0 24 24');
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z');
+            svg.appendChild(path);
+            return svg;
         }
 
         function getExactVideoLink(buttonElement) {
@@ -220,23 +235,29 @@
         }
 
         function setupZeroOverheadUrlTracker() {
+            let lastPath = window.location.pathname;
+
+            const notifyRouteChange = () => {
+                const currentPath = window.location.pathname;
+                if (currentPath !== lastPath) {
+                    lastPath = currentPath;
+                    window.dispatchEvent(new Event('xiv:locationchange'));
+                }
+            };
+
             const originalPushState = history.pushState;
             const originalReplaceState = history.replaceState;
 
             history.pushState = function() {
                 originalPushState.apply(this, arguments);
-                window.dispatchEvent(new Event('locationchange'));
+                notifyRouteChange();
             };
-
             history.replaceState = function() {
                 originalReplaceState.apply(this, arguments);
-                window.dispatchEvent(new Event('locationchange'));
+                notifyRouteChange();
             };
-
-            window.addEventListener('popstate', () => {
-                setTimeout(() => window.dispatchEvent(new Event('locationchange')), 50);
-            });
-            window.addEventListener('locationchange', handleRouteUpdate);
+            window.addEventListener('popstate', () => setTimeout(notifyRouteChange, 50));
+            window.addEventListener('xiv:locationchange', handleRouteUpdate);
         }
 
         function handleRouteUpdate() {
@@ -262,7 +283,10 @@
                 const commentBtn = findElementSync(CONFIG.selectors.tiktok.commentBtn);
                 if (commentBtn) {
                     const commentsAreOpen = findElementSync([CONFIG.selectors.tiktok.commentsContainer]) !== null;
-                    if (!commentsAreOpen) domUtils.simulateClick(commentBtn);
+                    if (!commentsAreOpen) {
+                        const clickableTarget = commentBtn.closest('button') || commentBtn;
+                        domUtils.simulateClick(clickableTarget);
+                    }
 
                     hasAttemptedAutoOpen = true;
                     obs.disconnect();
@@ -281,12 +305,54 @@
             }, 10000);
         }
 
+        function setupCrossTabSync() {
+            storage.listen(CONFIG.storage.stateKey, (key, oldVal, newVal, remote) => {
+                if (!newVal || !remote) return;
+
+                const btn = document.querySelector(`.${CONFIG.classes.btn}[data-url="${newVal.url}"]`);
+                if (!btn) return;
+
+                const wrapper = btn.querySelector(`.${CONFIG.classes.wrapper}`);
+
+                if (newVal.status === 'success') {
+                    btn.dataset.state = 'idle';
+                    if (wrapper) {
+                        wrapper.style.backgroundColor = '';
+                        wrapper.style.color = '';
+                    }
+                } else if (newVal.status === 'error') {
+                    btn.dataset.state = 'idle';
+                    if (wrapper) {
+                        wrapper.style.backgroundColor = CONFIG.colors.bgError;
+                        wrapper.style.color = CONFIG.colors.fgError;
+                        setTimeout(() => {
+                            wrapper.style.backgroundColor = '';
+                            wrapper.style.color = '';
+                        }, 3000);
+                    }
+                }
+            });
+        }
+
         function setupDebouncedObserver() {
             if (domObserver) domObserver.disconnect();
 
-            domObserver = new MutationObserver(() => {
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(maintainUI, 250);
+            domObserver = new MutationObserver((mutations) => {
+                let hasElementAdditions = false;
+                for (let i = 0; i < mutations.length; i++) {
+                    for (let j = 0; j < mutations[i].addedNodes.length; j++) {
+                        if (mutations[i].addedNodes[j].nodeType === Node.ELEMENT_NODE) {
+                            hasElementAdditions = true;
+                            break;
+                        }
+                    }
+                    if (hasElementAdditions) break;
+                }
+
+                if (hasElementAdditions) {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(maintainUI, 250);
+                }
             });
 
             domObserver.observe(document.documentElement, { childList: true, subtree: true });
@@ -294,48 +360,40 @@
         }
 
         function maintainUI() {
-            const avatarLinks = document.querySelectorAll(CONFIG.selectors.tiktok.avatar);
+            const avatarLinks = document.querySelectorAll(`${CONFIG.selectors.tiktok.avatar}:not(.${CONFIG.classes.processedAvatar})`);
 
             avatarLinks.forEach(avatarLink => {
+                avatarLink.classList.add(CONFIG.classes.processedAvatar);
+
                 const actionBar = avatarLink.closest('section');
-                if (actionBar && !actionBar.querySelector('.tiktok-downloader-btn')) {
+                if (actionBar && !actionBar.querySelector(`.${CONFIG.classes.btn}`)) {
 
                     const btn = document.createElement('button');
-                    btn.className = 'tiktok-downloader-btn';
+                    btn.className = CONFIG.classes.btn;
                     btn.type = 'button';
-                    btn.title = 'Download via SnapTik';
+                    btn.title = 'Download via SSSTik';
                     btn.dataset.state = "idle";
 
-                    btn.innerHTML = `
-                        <span class="downloader-icon-wrapper">
-                            <svg viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-                            </svg>
-                        </span>
-                    `;
+                    const wrapper = document.createElement('span');
+                    wrapper.className = CONFIG.classes.wrapper;
+                    wrapper.appendChild(createDownloadIcon());
+                    btn.appendChild(wrapper);
 
                     btn.onclick = (e) => {
                         e.preventDefault(); e.stopPropagation();
                         if (btn.dataset.state === 'processing') return;
 
                         const exactUrl = getExactVideoLink(btn);
-                        storage.set(CONFIG.storage.urlKey, exactUrl);
+                        btn.dataset.url = exactUrl;
 
+                        storage.set(CONFIG.storage.urlKey, exactUrl);
                         btn.dataset.state = 'processing';
-                        const wrapper = btn.querySelector('.downloader-icon-wrapper');
-                        if (wrapper) {
-                            wrapper.style.backgroundColor = CONFIG.colors.bgActive;
-                            wrapper.style.color = CONFIG.colors.fgActive;
-                        }
+
+                        wrapper.style.backgroundColor = CONFIG.colors.bgActive;
+                        wrapper.style.color = CONFIG.colors.fgActive;
 
                         setTimeout(() => {
-                            GM_openInTab(CONFIG.urls.snaptik, { active: false, insert: true });
-
-                            btn.dataset.state = 'idle';
-                            if (wrapper) {
-                                wrapper.style.backgroundColor = '';
-                                wrapper.style.color = '';
-                            }
+                            GM_openInTab(CONFIG.urls.ssstik, { active: false, insert: true });
                         }, 500);
                     };
 
@@ -344,8 +402,9 @@
             });
         }
 
-        // Initialize TikTok logic
+        injectStyles();
         setupZeroOverheadUrlTracker();
+        setupCrossTabSync();
         handleRouteUpdate();
         setupDebouncedObserver();
 
@@ -356,9 +415,9 @@
         });
 
     // ==========================================
-    // SNAPTIK MODULE (Background Tab)
+    // SSSTIK MODULE (Background Tab)
     // ==========================================
-    } else if (window.location.hostname === 'snaptik.app') {
+    } else if (window.location.hostname.includes('ssstik.io')) {
 
         const executeDownload = async () => {
             const url = storage.get(CONFIG.storage.urlKey);
@@ -367,38 +426,37 @@
             logger.info('Starting automated conversion for:', url);
             storage.set(CONFIG.storage.urlKey, null);
 
-            try {
-                // 1. Wait for elements
-                const input = await domUtils.waitForElement(CONFIG.selectors.snaptik.input);
-                const submitBtn = await domUtils.waitForElement(CONFIG.selectors.snaptik.submit);
+            const broadcastState = (status) => {
+                storage.set(CONFIG.storage.stateKey, { status, url, ts: Date.now() });
+            };
 
-                if (isCaptchaPresent()) throw new Error('captcha');
+            broadcastState('processing');
+
+            try {
+                // 1. Wait for form elements
+                const input = await domUtils.waitForElement(CONFIG.selectors.ssstik.input);
+                const submitBtn = await domUtils.waitForElement(CONFIG.selectors.ssstik.submit);
 
                 // 2. Inject URL & Submit
                 domUtils.setInputValue(input, url);
                 await sleep(CONFIG.timeouts.actionWait);
                 domUtils.simulateClick(submitBtn);
 
-                // 3. Wait for the final download button
+                // 3. Wait for the HTMX swap to reveal the "Without watermark" button
                 document.title = "Processing...";
-                const finalBtn = await domUtils.waitForElement(CONFIG.selectors.snaptik.download, CONFIG.timeouts.dlMaxWait);
-
-                if (isCaptchaPresent()) throw new Error('captcha');
+                const finalBtn = await domUtils.waitForElement(CONFIG.selectors.ssstik.download, CONFIG.timeouts.dlMaxWait);
 
                 // 4. Click Download & Cleanup
                 document.title = "Downloading...";
                 domUtils.simulateClick(finalBtn);
 
+                broadcastState('success');
                 setTimeout(() => window.close(), CONFIG.timeouts.tabCloseDelay);
 
             } catch (error) {
                 logger.error('Automation aborted:', error.message);
-
-                if (error.message.includes('captcha') || isCaptchaPresent()) {
-                    document.title = "⚠️ Captcha Required!";
-                } else if (error.message.includes('not found')) {
-                    document.title = "❌ Conversion Timeout";
-                }
+                document.title = "❌ Conversion Timeout";
+                broadcastState('error');
             }
         };
 
