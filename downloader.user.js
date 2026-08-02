@@ -2,7 +2,7 @@
 // @name         [TikTok] Downloader
 // @namespace    https://github.com/myouisaur/TikTok
 // @icon         https://www.tiktok.com/favicon.ico
-// @version      10.0
+// @version      10.1
 // @description  Adds a button to easily download TikTok videos and photo galleries.
 // @author       Xiv
 // @match        *://*.tiktok.com/*
@@ -204,7 +204,7 @@
             style.textContent = `
                 /* Base Styles (Feed Default) */
                 .${CONFIG.classes.btn} {
-                    background: none; border: none; padding: 0; margin: 0 0 12px 0;
+                    background: none; border: none; padding: 0; margin: 12px 0 0 0;
                     display: flex; flex-direction: column; align-items: center; justify-content: center;
                     cursor: pointer; z-index: 999; opacity: 1;
                     transition: opacity 0.2s ease;
@@ -404,7 +404,8 @@
                 if (anchor.matches('[data-e2e="video-author-avatar"]')) {
                     // Standard Vertical Feed View
                     actionBar = anchor.closest('section');
-                    if (actionBar) insertReference = actionBar.firstChild;
+                    // Setting insertReference to null appends the button to the bottom of the section
+                    if (actionBar) insertReference = null;
                 } else {
                     // Theater/Modal Horizontal View
                     // Skip if this like button is actually nested inside a standard feed section
